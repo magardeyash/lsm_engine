@@ -43,6 +43,10 @@ public:
     // call one of the Seek methods on the iterator before using it).
     Iterator* NewIterator(const ReadOptions& options) const;
 
+    // Returns true if the Bloom filter indicates the user key might be
+    // present in this table.  Returns true (conservative) if no filter exists.
+    bool MayContain(const Slice& user_key) const;
+
     // Given a key, return an approximate byte offset in the file where
     // the data for that key begins (or would begin if the key were
     // present in the file).  The returned value is in terms of file

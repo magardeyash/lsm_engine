@@ -7,6 +7,7 @@
 #include "src/util/crc32.h"
 #include "src/util/bloom.h"
 #include <fstream>
+#include <mutex>
 #include <vector>
 
 #ifdef LSM_HAVE_ZSTD
@@ -263,24 +264,25 @@ Iterator* Block::NewIterator(const Comparator* comparator) {
     }
 }
 
-static Status ReadBlock(const std::string& filename, const ReadOptions& options,
-                        const BlockHandle& handle, Block** result) {
+// ReadBlock: reads a block from the persistent file handle stored in Table::Rep.
+// Protected by file_mutex_ to serialize concurrent reads on the same stream.
+static Status ReadBlockFromHandle(std::ifstream& file, std::mutex& file_mutex,
+                                  const ReadOptions& options,
+                                  const BlockHandle& handle, Block** result) {
     *result = nullptr;
-
-    // Open an independent file handle for this read to avoid races with
-    // concurrent readers sharing the same Table object via the cache.
-    std::ifstream file(filename, std::ios::in | std::ios::binary);
-    if (!file.is_open()) {
-        return Status::IOError("failed to open file for block read: ", filename);
-    }
 
     const size_t n = static_cast<size_t>(handle.size());
     char* buf = new char[n + kBlockTrailerSize];
-    file.seekg(handle.offset(), std::ios::beg);
-    file.read(buf, n + kBlockTrailerSize);
-    if (file.gcount() != static_cast<std::streamsize>(n + kBlockTrailerSize)) {
-        delete[] buf;
-        return Status::IOError("truncated block read");
+
+    {
+        std::lock_guard<std::mutex> lock(file_mutex);
+        file.clear();  // Clear any previous EOF/error flags
+        file.seekg(handle.offset(), std::ios::beg);
+        file.read(buf, n + kBlockTrailerSize);
+        if (file.gcount() != static_cast<std::streamsize>(n + kBlockTrailerSize)) {
+            delete[] buf;
+            return Status::IOError("truncated block read");
+        }
     }
 
     if (options.verify_checksums) {
@@ -295,8 +297,6 @@ static Status ReadBlock(const std::string& filename, const ReadOptions& options,
     switch (buf[n]) {
         case Options::kNoCompression:
             *result = new Block(Slice(buf, n));
-            // Block takes ownership if we arrange for it, but here Block
-            // deletes data_ itself in destructor, so we are good.
             break;
 
         case Options::kZstdCompression: {
@@ -333,13 +333,19 @@ struct Table::Rep {
         delete filter;
         delete[] const_cast<char*>(filter_data);
         delete index_block;
+        // file_ is closed automatically by ifstream destructor
     }
 
     Options options;
     Status status;
-    std::string filename;     // Path to the SSTable file (for independent reads)
+    std::string filename;     // Path to the SSTable file
     uint64_t file_size;
     
+    // Persistent file handle — opened once, reused for all reads.
+    // Protected by file_mutex_ for thread-safe concurrent access.
+    std::ifstream file_;
+    std::mutex file_mutex_;
+
     Footer footer;
     Block* index_block;
     const char* filter_data;
@@ -358,37 +364,44 @@ Status Table::Open(const Options& options,
         return Status::Corruption("file is too short to be an sstable");
     }
 
-    // Use a temporary file handle for reading the footer and index block
-    // during Open. After Open, all reads use independent handles.
-    std::ifstream file(filename, std::ios::in | std::ios::binary);
-    if (!file.is_open()) {
+    // Open the persistent file handle for this Table.
+    Rep* rep = new Table::Rep;
+    rep->file_.open(filename, std::ios::in | std::ios::binary);
+    if (!rep->file_.is_open()) {
+        delete rep;
         return Status::IOError("Failed to open SSTable: ", filename);
     }
 
+    // Read the footer using the persistent handle.
     char footer_input[Footer::kEncodedLength];
-    file.seekg(file_size - Footer::kEncodedLength, std::ios::beg);
-    file.read(footer_input, Footer::kEncodedLength);
-    if (file.gcount() != Footer::kEncodedLength) {
-        return Status::IOError("Failed to read footer from SSTable.");
+    {
+        std::lock_guard<std::mutex> lock(rep->file_mutex_);
+        rep->file_.seekg(file_size - Footer::kEncodedLength, std::ios::beg);
+        rep->file_.read(footer_input, Footer::kEncodedLength);
+        if (rep->file_.gcount() != Footer::kEncodedLength) {
+            delete rep;
+            return Status::IOError("Failed to read footer from SSTable.");
+        }
     }
 
     Footer footer;
     Slice footer_input_slice(footer_input, Footer::kEncodedLength);
     Status s = footer.DecodeFrom(&footer_input_slice);
     if (!s.ok()) {
+        delete rep;
         return s;
     }
 
-    // Read the index block
+    // Read the index block using the persistent handle.
     Block* index_block = nullptr;
     ReadOptions opt;
     if (options.paranoid_checks) {
         opt.verify_checksums = true;
     }
-    s = ReadBlock(filename, opt, footer.index_handle(), &index_block);
+    s = ReadBlockFromHandle(rep->file_, rep->file_mutex_, opt,
+                            footer.index_handle(), &index_block);
 
     if (s.ok()) {
-        Rep* rep = new Table::Rep;
         rep->options = options;
         rep->filename = filename;
         rep->file_size = file_size;
@@ -400,6 +413,7 @@ Status Table::Open(const Options& options,
         (*table)->ReadMeta(footer);
     } else {
         delete index_block;
+        delete rep;
     }
 
     return s;
@@ -415,7 +429,8 @@ void Table::ReadMeta(const Footer& footer) {
         opt.verify_checksums = true;
     }
     Block* meta = nullptr;
-    Status s = ReadBlock(rep_->filename, opt, footer.metaindex_handle(), &meta);
+    Status s = ReadBlockFromHandle(rep_->file_, rep_->file_mutex_, opt,
+                                   footer.metaindex_handle(), &meta);
     if (!s.ok()) {
         return; // Ignore errors reading metaindex
     }
@@ -438,21 +453,19 @@ void Table::ReadFilter(const Slice& filter_handle_value) {
         return;
     }
 
-    // Read raw filter data directly from file (NOT as a Block, since bloom
-    // filter data has no restart points — it's just raw bytes).
+    // Read raw filter data using the persistent file handle.
     size_t n = static_cast<size_t>(filter_handle.size());
     char* buf = new char[n];
 
-    std::ifstream file(rep_->filename, std::ios::in | std::ios::binary);
-    if (!file.is_open()) {
-        delete[] buf;
-        return;
-    }
-    file.seekg(filter_handle.offset());
-    file.read(buf, n);
-    if (file.fail()) {
-        delete[] buf;
-        return;
+    {
+        std::lock_guard<std::mutex> lock(rep_->file_mutex_);
+        rep_->file_.clear();
+        rep_->file_.seekg(filter_handle.offset());
+        rep_->file_.read(buf, n);
+        if (rep_->file_.fail()) {
+            delete[] buf;
+            return;
+        }
     }
 
     rep_->filter_data = buf;
@@ -475,14 +488,10 @@ Iterator* Table::BlockReader(void* arg, const ReadOptions& options, const Slice&
     }
 
     Block* block = nullptr;
-    // TODO: implement BlockCache lookup here
-    s = ReadBlock(table->rep_->filename, options, handle, &block);
+    s = ReadBlockFromHandle(table->rep_->file_, table->rep_->file_mutex_,
+                            options, handle, &block);
     if (s.ok()) {
         Iterator* iter = block->NewIterator(table->rep_->options.comparator);
-        // Normally we'd register a cleanup function to delete the block.
-        // For simplicity now, we leak or need a custom iterator that owns the block.
-        // We will just let iter delete block.
-        // Or actually, let's create a wrapper iterator:
         class BlockIterWrapper : public Iterator {
         public:
             BlockIterWrapper(Iterator* i, Block* b) : iter(i), block(b) {}
@@ -682,6 +691,13 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k,
         s = iiter->status();
     }
     return s;
+}
+
+bool Table::MayContain(const Slice& user_key) const {
+    if (rep_->filter == nullptr) {
+        return true;  // No filter, conservatively return true
+    }
+    return rep_->filter->KeyMayMatch(user_key, Slice(rep_->filter_data, rep_->filter_data_size));
 }
 
 uint64_t Table::ApproximateOffsetOf(const Slice& key) const {

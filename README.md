@@ -69,13 +69,18 @@ Data flows through three distinct layers:
 |---|---|
 | **MemTable + SkipList** | O(log n) in-memory writes using a lock-free probabilistic skiplist |
 | **Write-Ahead Log** | Sequential disk log for crash recovery before data hits an SSTable |
+| **Group Commit** | Leader-follower batching of concurrent writes into a single WAL record for higher throughput |
 | **SSTables** | Immutable, block-structured files with prefix-compressed keys and CRC32 checksums |
 | **Bloom Filters** | Per-SSTable probabilistic filters that eliminate unnecessary disk I/O for missing keys |
+| **Bloom-Optimized Compaction** | Bloom filters skip unnecessary tombstone retention during multi-level compaction |
 | **Block Index** | Binary-searchable per-SSTable index for fast key lookups without full scans |
 | **Multi-Level Compaction** | Background thread merges and de-duplicates SSTables across 7 levels |
+| **Persistent File Handles** | Each SSTable keeps a single file handle open, protected by a mutex, eliminating per-read open/close overhead |
 | **LRU Block Cache** | Configurable in-memory block cache to serve hot data without disk access |
 | **Crash Recovery** | Replays the WAL on `DB::Open` to restore unflushed MemTable writes |
 | **Thread-Safe** | All public APIs are safe for concurrent access from multiple threads |
+| **Safe Shutdown** | Joinable background compaction thread with graceful shutdown via `shutting_down_` flag |
+| **`shared_ptr` Ownership** | Table objects are reference-counted; iterators prevent premature cache eviction |
 | **Zstd Compression** | Optional block-level compression (compile with `-DLSM_HAVE_ZSTD`) |
 
 ---
@@ -123,7 +128,10 @@ lsm_engine/
 ├── tests/                 # GoogleTest unit and integration tests
 │   ├── test_bloom.cc      # Bloom filter correctness
 │   ├── test_compaction.cc # Bulk write → flush → compaction → read-back
+│   ├── test_concurrency.cc# Stress: concurrent reads+writes+deletes + compaction
+│   ├── test_crash_recovery.cc # Open/close cycles, destroy/recreate
 │   ├── test_db.cc         # Full DB API (put, get, delete, iteration)
+│   ├── test_group_commit.cc   # Multi-threaded write batching
 │   ├── test_memtable.cc   # MemTable insert, lookup, iteration
 │   └── test_sstable.cc    # SSTable build, open, and scan
 │
@@ -179,17 +187,23 @@ Expected output:
 ```
 Test project .../lsm_engine/build
     Start 1: test_bloom
-1/5 Test #1: test_bloom .......................   Passed    0.03 sec
+1/8 Test #1: test_bloom .......................   Passed    0.03 sec
     Start 2: test_compaction
-2/5 Test #2: test_compaction ..................   Passed    1.07 sec
+2/8 Test #2: test_compaction ..................   Passed    1.07 sec
     Start 3: test_db
-3/5 Test #3: test_db ..........................   Passed    0.25 sec
+3/8 Test #3: test_db ..........................   Passed    0.25 sec
     Start 4: test_memtable
-4/5 Test #4: test_memtable ....................   Passed    0.04 sec
+4/8 Test #4: test_memtable ....................   Passed    0.04 sec
     Start 5: test_sstable
-5/5 Test #5: test_sstable .....................   Passed    0.04 sec
+5/8 Test #5: test_sstable .....................   Passed    0.04 sec
+    Start 6: test_group_commit
+6/8 Test #6: test_group_commit ................   Passed    0.15 sec
+    Start 7: test_crash_recovery
+7/8 Test #7: test_crash_recovery ..............   Passed    0.30 sec
+    Start 8: test_concurrency
+8/8 Test #8: test_concurrency .................   Passed    0.20 sec
 
-100% tests passed, 0 tests failed out of 5
+100% tests passed, 0 tests failed out of 8
 ```
 
 Run an individual test directly:
@@ -308,6 +322,9 @@ All options are set in `lsm::Options` and passed to `DB::Open`.
 ### Thread Safety
 All public DB methods (`Put`, `Get`, `Delete`, `NewIterator`) are thread-safe. A single `std::mutex` serializes all writes; reads and compaction run concurrently.
 
+### Group Commit
+Concurrent `Put`/`Delete` calls are batched by a leader-follower protocol. The thread at the front of the `writers_` deque becomes the leader, collects all pending writers into a single WAL record (up to 1 MB), writes the record once, applies all entries to the memtable, and signals the follower threads that their writes are complete. If any writer in the batch requested `sync`, the entire batch is fsynced.
+
 ### SSTable Format
 Each SSTable file has the layout:
 ```
@@ -319,8 +336,13 @@ Each SSTable file has the layout:
 ```
 Every block ends with a 1-byte compression type and a 4-byte CRC32c checksum.
 
-### Thread-Safe Reads from SSTables
-Each `ReadBlock` call opens its own independent `ifstream` instead of sharing a file handle, making concurrent reads from the same SSTable (e.g., an iterator and a `Get` call) safe without any locking overhead.
+### Persistent File Handles
+Each `Table` object holds a single `std::ifstream` opened once during `Table::Open`. All `ReadBlock` calls reuse this handle, protected by a `std::mutex`. This eliminates the overhead of opening and closing a file handle on every block read.
+
+### Ownership Model
+`Table` objects in the `TableCache` are managed via `std::shared_ptr<Table>`. When an iterator is created from a cached table, it captures a `shared_ptr` copy. If the cache evicts the entry while an iterator is alive, the `Table` stays in memory until the last reference (iterator) is destroyed.
 
 ### Compaction
-Background compaction runs on a dedicated thread (spawned via `std::thread::detach`). It selects files for compaction based on a score: L0 by file count, L1+ by total bytes relative to the level's size target (10× per level). Compacted output goes one level down, dropping overwritten and deleted keys that are no longer visible to any live read.
+A persistent joinable background thread processes compaction work. `MaybeScheduleCompaction()` signals the thread via a condition variable. On shutdown, the destructor sets `shutting_down_`, signals the CV, and joins the thread — preventing use-after-free.
+
+During compaction, Bloom filters are consulted when deciding whether to drop tombstones. If all output-level files' Bloom filters say a deleted key is absent, the tombstone is dropped early, saving disk space.

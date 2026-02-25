@@ -105,14 +105,30 @@ DBImpl::DBImpl(const Options& options, const std::string& dbname)
     table_cache_ = new TableCache(dbname, &internal_options_, internal_options_.block_cache_capacity);
     versions_ = new VersionSet(dbname, &internal_options_, table_cache_);
     mem_->Ref();
+
+    // Start the persistent background compaction thread
+    bg_thread_ = std::thread(&DBImpl::BackgroundThreadMain, this);
 }
 
 DBImpl::~DBImpl() {
-    std::unique_lock<std::mutex> l(mutex_);
-    shutting_down_.store(true, std::memory_order_release);
-    while (bg_compaction_scheduled_) {
-        bg_cv_.wait(l);
+    {
+        std::unique_lock<std::mutex> l(mutex_);
+        shutting_down_.store(true, std::memory_order_release);
+        bg_work_cv_.notify_one();  // Wake the background thread so it can exit
     }
+
+    // Join the persistent background thread
+    if (bg_thread_.joinable()) {
+        bg_thread_.join();
+    }
+
+    {
+        std::unique_lock<std::mutex> l(mutex_);
+        while (bg_compaction_scheduled_) {
+            bg_cv_.wait(l);
+        }
+    }
+
     if (mem_ != nullptr) mem_->Unref();
     if (imm_ != nullptr) imm_->Unref();
     delete versions_;
@@ -162,88 +178,124 @@ Status DBImpl::MakeRoomForWrite(bool force) {
     return s;
 }
 
+// ---------------------------------------------------------------------------
+// Group commit: Put and Delete both enqueue a Writer and call Write().
+// The leader thread batches all queued writers into a single WAL record
+// and applies them all to the memtable atomically.
+// ---------------------------------------------------------------------------
+
 Status DBImpl::Put(const WriteOptions& options, const Slice& key, const Slice& value) {
     Writer w(&options, kTypeValue, key, value);
-    std::unique_lock<std::mutex> l(mutex_);
-    writers_.push_back(&w);
-    while (!w.done && &w != writers_.front()) {
-        w.cv.wait(l);
-    }
-    if (w.done) {
-        return w.status;
-    }
-
-    Status s = MakeRoomForWrite(false);
-    uint64_t last_sequence = versions_->LastSequence();
-    
-    if (s.ok()) {
-        std::string record;
-        // In full LevelDB, WriteBatch is used to group multiple writes and serialize.
-        // We'll mimic this by writing a simplistic serialized version or individual Wal records.
-        // For simplicity, we just write the single KV pair to the WAL.
-        // Format: Sequence (8) | Type (1) | Key Length (var) | Key | Value Length (var) | Value
-        PutFixed64(&record, last_sequence + 1);
-        record.push_back(static_cast<char>(w.type));
-        PutLengthPrefixedSlice(&record, w.key);
-        PutLengthPrefixedSlice(&record, w.value);
-        s = log_->AddRecord(record);
-        if (s.ok() && options.sync) {
-            s = log_->Sync();
-        }
-        if (s.ok()) {
-            last_sequence++;
-            mem_->Add(last_sequence, w.type, w.key, w.value);
-            versions_->SetLastSequence(last_sequence);
-        }
-    }
-
-    w.status = s;
-    w.done = true;
-    writers_.pop_front();
-    if (!writers_.empty()) {
-        writers_.front()->cv.notify_one();
-    }
-    return w.status;
+    return Write(&w);
 }
 
 Status DBImpl::Delete(const WriteOptions& options, const Slice& key) {
     Writer w(&options, kTypeDeletion, key, Slice());
-    std::unique_lock<std::mutex> l(mutex_);
-    writers_.push_back(&w);
-    while (!w.done && &w != writers_.front()) {
-        w.cv.wait(l);
+    return Write(&w);
+}
+
+DBImpl::Writer* DBImpl::BuildBatchGroup(Writer** last_writer) {
+    assert(!writers_.empty());
+    Writer* first = writers_.front();
+    *last_writer = first;
+
+    // Walk the deque and group all pending writers into the batch.
+    // Cap the batch at ~1 MB to avoid excessive WAL record sizes.
+    static const size_t kMaxBatchSize = 1 << 20;  // 1 MB
+    size_t size = first->key.size() + first->value.size();
+
+    for (auto it = writers_.begin() + 1; it != writers_.end(); ++it) {
+        Writer* w = *it;
+        size += w->key.size() + w->value.size();
+        if (size > kMaxBatchSize) break;
+        *last_writer = w;
     }
-    if (w.done) {
-        return w.status;
+    return first;
+}
+
+Status DBImpl::Write(Writer* my_writer) {
+    std::unique_lock<std::mutex> l(mutex_);
+    writers_.push_back(my_writer);
+
+    // Wait until this writer becomes the leader (front of deque) or is
+    // completed by another leader.
+    while (!my_writer->done && my_writer != writers_.front()) {
+        my_writer->cv.wait(l);
+    }
+    if (my_writer->done) {
+        return my_writer->status;
     }
 
+    // This thread is the leader. Batch all pending writers.
     Status s = MakeRoomForWrite(false);
     uint64_t last_sequence = versions_->LastSequence();
 
+    Writer* last_writer = my_writer;
     if (s.ok()) {
+        BuildBatchGroup(&last_writer);
+
+        // Serialize the entire batch into a single WAL record.
+        // Format: [count (4)] { Sequence (8) | Type (1) | KeyLen | Key | ValLen | Val } ...
         std::string record;
-        PutFixed64(&record, last_sequence + 1);
-        record.push_back(static_cast<char>(w.type));
-        PutLengthPrefixedSlice(&record, w.key);
-        PutLengthPrefixedSlice(&record, w.value); // empty slice
+        bool need_sync = false;
+        uint32_t count = 0;
+
+        // Reserve space for count header, will fill in later
+        record.resize(4);
+
+        for (auto it = writers_.begin(); ; ++it) {
+            Writer* w = *it;
+            last_sequence++;
+            PutFixed64(&record, last_sequence);
+            record.push_back(static_cast<char>(w->type));
+            PutLengthPrefixedSlice(&record, w->key);
+            PutLengthPrefixedSlice(&record, w->value);
+            if (w->options->sync) need_sync = true;
+            count++;
+            if (w == last_writer) break;
+        }
+
+        // Fill in the count header
+        EncodeFixed32(&record[0], count);
+
         s = log_->AddRecord(record);
-        if (s.ok() && options.sync) {
+        if (s.ok() && need_sync) {
             s = log_->Sync();
         }
+
+        // Apply all entries to the memtable
         if (s.ok()) {
-            last_sequence++;
-            mem_->Add(last_sequence, w.type, w.key, w.value);
+            uint64_t seq = versions_->LastSequence();
+            for (auto it = writers_.begin(); ; ++it) {
+                Writer* w = *it;
+                seq++;
+                mem_->Add(seq, w->type, w->key, w->value);
+                if (w == last_writer) break;
+            }
             versions_->SetLastSequence(last_sequence);
         }
     }
 
-    w.status = s;
-    w.done = true;
-    writers_.pop_front();
+    // Signal all writers in the batch that they are done.
+    while (true) {
+        Writer* ready = writers_.front();
+        writers_.pop_front();
+        if (ready != my_writer) {
+            ready->status = s;
+            ready->done = true;
+            ready->cv.notify_one();
+        }
+        if (ready == last_writer) break;
+    }
+
+    // Wake the next leader if there are more writers waiting.
     if (!writers_.empty()) {
         writers_.front()->cv.notify_one();
     }
-    return w.status;
+
+    my_writer->status = s;
+    my_writer->done = true;
+    return s;
 }
 
 Status DBImpl::Get(const ReadOptions& options, const Slice& key, std::string* value) {
@@ -387,6 +439,10 @@ Iterator* DBImpl::NewIterator(const ReadOptions& options) {
     return new DBIterator(this, options_.comparator, internal_iter, versions_->LastSequence(), mem, imm, current);
 }
 
+// ---------------------------------------------------------------------------
+// Background compaction: persistent thread wakes on demand via condition variable
+// ---------------------------------------------------------------------------
+
 void DBImpl::MaybeScheduleCompaction() {
     if (bg_compaction_scheduled_) return;
     if (shutting_down_.load(std::memory_order_acquire)) return;
@@ -398,11 +454,21 @@ void DBImpl::MaybeScheduleCompaction() {
     }
 
     bg_compaction_scheduled_ = true;
-    std::thread(&DBImpl::BackgroundCall, this).detach();
+    bg_work_cv_.notify_one();  // Wake the persistent background thread
+}
+
+void DBImpl::BackgroundThreadMain() {
+    std::unique_lock<std::mutex> l(mutex_);
+    while (!shutting_down_.load(std::memory_order_acquire)) {
+        if (!bg_compaction_scheduled_) {
+            bg_work_cv_.wait(l);
+            continue;
+        }
+        BackgroundCall();
+    }
 }
 
 void DBImpl::BackgroundCall() {
-    std::unique_lock<std::mutex> l(mutex_);
     assert(bg_compaction_scheduled_);
     if (shutting_down_.load(std::memory_order_acquire)) {
         // Stop
@@ -415,7 +481,7 @@ void DBImpl::BackgroundCall() {
     bg_compaction_scheduled_ = false;
 
     // Previous compaction may have produced too many files in a level,
-    // so maybe schedule another compaction.
+    // so reschedule if needed.
     MaybeScheduleCompaction();
     bg_cv_.notify_all();
 }
@@ -578,7 +644,23 @@ Status DBImpl::DoCompactionWork(Compaction* c) {
             } else if (ikey.type == kTypeDeletion &&
                        ikey.sequence <= smallest_snapshot &&
                        c->IsBaseLevelForKey(ikey.user_key)) {
-                drop = true;
+                // No higher-level files contain this key (by key range).
+                // Additionally check Bloom filters of the output-level files
+                // to see if the deleted key might actually exist there.
+                // If Bloom filters all say "not present", the tombstone can
+                // be safely dropped (false positives just keep it — safe).
+                bool maybe_in_output = false;
+                for (int i = 0; i < c->num_input_files(1); i++) {
+                    FileMetaData* f = c->input(1, i);
+                    if (table_cache_->MayContain(f->number, f->file_size,
+                                                 ikey.user_key)) {
+                        maybe_in_output = true;
+                        break;
+                    }
+                }
+                if (!maybe_in_output) {
+                    drop = true;
+                }
             }
 
             last_sequence_for_key = ikey.sequence;

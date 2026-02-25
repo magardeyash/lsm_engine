@@ -33,10 +33,15 @@ private:
     friend class DB;
     struct Writer;
 
+    // Group commit: batches multiple writers into a single WAL write
+    Status Write(Writer* my_writer);
+    Writer* BuildBatchGroup(Writer** last_writer);
+
     Status MakeRoomForWrite(bool force = false);
     Status WriteLevel0Table(MemTable* mem, VersionEdit* edit, Version* base);
     Status BackgroundCompaction();
     void BackgroundCall();
+    void BackgroundThreadMain();
     void MaybeScheduleCompaction();
 
     Status DoCompactionWork(Compaction* c);
@@ -58,6 +63,10 @@ private:
     std::condition_variable bg_cv_;
     std::atomic<bool> shutting_down_;
     bool bg_compaction_scheduled_;
+
+    // Persistent background compaction thread
+    std::thread bg_thread_;
+    std::condition_variable bg_work_cv_;
 
     MemTable* mem_;
     MemTable* imm_;  // Memtable being compacted

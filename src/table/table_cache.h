@@ -41,6 +41,11 @@ public:
     // Evict any entry for the specified file number
     void Evict(uint64_t file_number);
 
+    // Query the Bloom filter of the specified file.  Returns true if the
+    // key might be present (conservative if no filter exists).
+    bool MayContain(uint64_t file_number, uint64_t file_size,
+                    const Slice& user_key);
+
 private:
     Status FindTable(uint64_t file_number, uint64_t file_size, Cache::Handle** handle);
 

@@ -1,16 +1,22 @@
 #include "src/table/table_cache.h"
 #include "src/util/coding.h"
 #include "lsm/db.h"
+#include <memory>
 
 namespace lsm {
 
+// Ownership model:
+// - Each cached Table is wrapped in a std::shared_ptr<Table>.
+// - TableAndFile holds the shared_ptr.  When the LRU cache evicts an entry,
+//   DeleteEntry releases the shared_ptr.  If no iterators hold a copy,
+//   the Table is destroyed.  If iterators still hold a copy, the Table
+//   stays alive until the last iterator is destroyed.
 struct TableAndFile {
-    Table* table;
+    std::shared_ptr<Table> table;
 };
 
 static void DeleteEntry(const Slice& key, void* value) {
     TableAndFile* tf = reinterpret_cast<TableAndFile*>(value);
-    delete tf->table;
     delete tf;
 }
 
@@ -46,11 +52,11 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size, Cache::Ha
     *handle = cache_->Lookup(key);
     if (*handle == nullptr) {
         std::string fname = TableFileName(dbname_, file_number);
-        Table* table = nullptr;
-        s = Table::Open(*options_, fname, file_size, &table);
+        Table* raw_table = nullptr;
+        s = Table::Open(*options_, fname, file_size, &raw_table);
         if (s.ok()) {
             TableAndFile* tf = new TableAndFile;
-            tf->table = table;
+            tf->table.reset(raw_table);
             *handle = cache_->Insert(key, tf, 1, &DeleteEntry);
         }
     }
@@ -75,14 +81,19 @@ Iterator* TableCache::NewIterator(const ReadOptions& options,
         return NewErrorIterator(s);
     }
 
-    Table* table = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table;
+    Table* table = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table.get();
+    // Capture a shared_ptr copy so the Table stays alive even if evicted
+    // from the cache while this iterator is in use.
+    std::shared_ptr<Table> table_ref = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table;
     Iterator* result = table->NewIterator(options);
 
-    // Wrap the iterator to release the cache handle when the iterator is destroyed
+    // Wrap the iterator to release the cache handle and hold a shared_ptr
+    // reference to the Table, ensuring it outlives the iterator.
     class TableCacheIteratorWrapper : public Iterator {
     public:
-        TableCacheIteratorWrapper(Iterator* iter, Cache* cache, Cache::Handle* handle)
-            : iter_(iter), cache_(cache), handle_(handle) {}
+        TableCacheIteratorWrapper(Iterator* iter, Cache* cache, Cache::Handle* handle,
+                                  std::shared_ptr<Table> table_ref)
+            : iter_(iter), cache_(cache), handle_(handle), table_ref_(std::move(table_ref)) {}
         ~TableCacheIteratorWrapper() override {
             delete iter_;
             cache_->Release(handle_);
@@ -100,9 +111,10 @@ Iterator* TableCache::NewIterator(const ReadOptions& options,
         Iterator* iter_;
         Cache* cache_;
         Cache::Handle* handle_;
+        std::shared_ptr<Table> table_ref_;  // Prevents Table destruction
     };
     
-    Iterator* wrapped = new TableCacheIteratorWrapper(result, cache_, handle);
+    Iterator* wrapped = new TableCacheIteratorWrapper(result, cache_, handle, table_ref);
     
     if (tableptr != nullptr) {
         *tableptr = table;
@@ -119,7 +131,7 @@ Status TableCache::Get(const ReadOptions& options,
     Cache::Handle* handle = nullptr;
     Status s = FindTable(file_number, file_size, &handle);
     if (s.ok()) {
-        Table* t = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table;
+        Table* t = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table.get();
         // The InternalGet is protected by friendship or public exposure
         // We'll expose InternalGet or use NewIterator. Table::InternalGet is better for speed.
         s = t->InternalGet(options, k, arg, handle_result);
@@ -132,6 +144,19 @@ void TableCache::Evict(uint64_t file_number) {
     char buf[sizeof(file_number)];
     EncodeFixed64(buf, file_number);
     cache_->Erase(Slice(buf, sizeof(buf)));
+}
+
+bool TableCache::MayContain(uint64_t file_number, uint64_t file_size,
+                            const Slice& user_key) {
+    Cache::Handle* handle = nullptr;
+    Status s = FindTable(file_number, file_size, &handle);
+    if (!s.ok()) {
+        return true;  // Conservative: assume key may be present on error
+    }
+    Table* t = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table.get();
+    bool result = t->MayContain(user_key);
+    cache_->Release(handle);
+    return result;
 }
 
 }  // namespace lsm
