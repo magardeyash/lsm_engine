@@ -9,3 +9,4 @@ out/
 *.dylib
 compile_commands.json
 .DS_Store
+PROJECT_GUIDES.md
