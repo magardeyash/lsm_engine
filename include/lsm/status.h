@@ -7,7 +7,6 @@ namespace lsm {
 
 class Status {
 public:
-    // Create a success status.
     Status() noexcept : state_(nullptr) {}
     ~Status() { delete[] state_; }
 
@@ -17,10 +16,8 @@ public:
     Status(Status&& rhs) noexcept : state_(rhs.state_) { rhs.state_ = nullptr; }
     Status& operator=(Status&& rhs) noexcept;
 
-    // Return a success status.
     static Status OK() { return Status(); }
 
-    // Return error status of an appropriate type.
     static Status NotFound(const Slice& msg, const Slice& msg2 = Slice()) {
         return Status(kNotFound, msg, msg2);
     }
@@ -37,26 +34,18 @@ public:
         return Status(kIOError, msg, msg2);
     }
 
-    // Returns true iff the status indicates success.
     bool ok() const { return (state_ == nullptr); }
 
-    // Returns true iff the status indicates a NotFound error.
     bool IsNotFound() const { return code() == kNotFound; }
 
-    // Returns true iff the status indicates a Corruption error.
     bool IsCorruption() const { return code() == kCorruption; }
 
-    // Returns true iff the status indicates an IOError.
     bool IsIOError() const { return code() == kIOError; }
 
-    // Returns true iff the status indicates a NotSupportedError.
     bool IsNotSupportedError() const { return code() == kNotSupported; }
 
-    // Returns true iff the status indicates an InvalidArgument.
     bool IsInvalidArgument() const { return code() == kInvalidArgument; }
 
-    // Return a string representation of this status suitable for printing.
-    // Returns the string "OK" for success.
     std::string ToString() const;
 
 private:
@@ -76,10 +65,7 @@ private:
     Status(Code code, const Slice& msg, const Slice& msg2);
     static const char* CopyState(const char* s);
 
-    // state_ is allocated with new[].
-    // state_[0..3] == length of message
-    // state_[4]    == code
-    // state_[5..]  == message
+    // state_ layout: [0..3]=msg length, [4]=code, [5..]=message
     const char* state_;
 };
 
@@ -88,8 +74,6 @@ inline Status::Status(const Status& rhs) {
 }
 
 inline Status& Status::operator=(const Status& rhs) {
-    // The following condition catches both aliasing (when this == &rhs),
-    // and the common case where both rhs and *this are ok.
     if (state_ != rhs.state_) {
         delete[] state_;
         state_ = (rhs.state_ == nullptr) ? nullptr : CopyState(rhs.state_);
@@ -106,4 +90,4 @@ inline Status& Status::operator=(Status&& rhs) noexcept {
     return *this;
 }
 
-}  // namespace lsm
+}

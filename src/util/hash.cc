@@ -4,7 +4,6 @@
 
 namespace lsm {
 
-// MurmurHash3_x86_32 implementation
 uint32_t Hash(const char* data, size_t n, uint32_t seed) {
     const uint32_t m = 0xcc9e2d51;
     const uint32_t n_const = 0x1b873593;
@@ -60,4 +59,4 @@ uint32_t Hash(const char* data, size_t n, uint32_t seed) {
     return h;
 }
 
-}  // namespace lsm
+}

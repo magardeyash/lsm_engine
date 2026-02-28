@@ -90,10 +90,8 @@ public:
                 if (child != current_) {
                     child->Seek(key());
                     if (child->Valid()) {
-                        // Child is at first entry >= key().  Step back one to be < key()
                         child->Prev();
                     } else {
-                        // Child has no entries >= key().  Position at last entry.
                         child->SeekToLast();
                     }
                 }
@@ -205,7 +203,7 @@ private:
     Direction direction_;
 };
 
-}  // namespace
+}
 
 Iterator* NewMergingIterator(const Comparator* comparator, Iterator** children, int n) {
     if (n == 0) {
@@ -217,4 +215,4 @@ Iterator* NewMergingIterator(const Comparator* comparator, Iterator** children, 
     }
 }
 
-}  // namespace lsm
+}

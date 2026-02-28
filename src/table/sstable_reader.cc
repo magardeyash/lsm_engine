@@ -25,7 +25,6 @@ static inline const char* DecodeEntry(const char* p, const char* limit,
     *non_shared = reinterpret_cast<const uint8_t*>(p)[1];
     *value_length = reinterpret_cast<const uint8_t*>(p)[2];
     if ((*shared | *non_shared | *value_length) < 128) {
-        // Fast path: all three values are single byte each
         p += 3;
     } else {
         if ((p = GetVarint32Ptr(p, limit, shared)) == nullptr) return nullptr;
@@ -47,12 +46,11 @@ public:
           size_(contents.size()),
           restart_offset_(0) {
         if (size_ < sizeof(uint32_t)) {
-            size_ = 0;  // Error marker
+            size_ = 0;
             return;
         }
         size_t max_restarts_allowed = (size_ - sizeof(uint32_t)) / sizeof(uint32_t);
         if (NumRestarts() > max_restarts_allowed) {
-            // The size is too small for NumRestarts()
             size_ = 0;
             return;
         }
@@ -121,11 +119,9 @@ public:
 
     void Prev() override {
         assert(Valid());
-        // Go to restart point just before current_
         const uint32_t original = current_;
         while (GetRestartPoint(restart_index_) >= original) {
             if (restart_index_ == 0) {
-                // No more entries
                 current_ = restarts_;
                 restart_index_ = num_restarts_;
                 return;
@@ -135,12 +131,10 @@ public:
 
         SeekToRestartPoint(restart_index_);
         do {
-            // Nothing needed here
         } while (ParseNextKey() && NextEntryOffset() < original);
     }
 
     void Seek(const Slice& target) override {
-        // Binary search in restart array
         uint32_t left = 0;
         uint32_t right = num_restarts_ - 1;
         while (left < right) {
@@ -181,7 +175,6 @@ public:
     void SeekToLast() override {
         SeekToRestartPoint(num_restarts_ - 1);
         while (ParseNextKey() && NextEntryOffset() < restarts_) {
-            // Keep skipping
         }
     }
 
@@ -197,9 +190,8 @@ private:
     bool ParseNextKey() {
         current_ = NextEntryOffset();
         const char* p = data_ + current_;
-        const char* limit = data_ + restarts_;  // Restarts come right after data
+        const char* limit = data_ + restarts_;
         if (p >= limit) {
-            // No more entries
             current_ = restarts_;
             restart_index_ = num_restarts_;
             return false;
@@ -230,7 +222,6 @@ private:
     void SeekToRestartPoint(uint32_t index) {
         key_.clear();
         restart_index_ = index;
-        // current_ will be fixed by ParseNextKey()
         uint32_t offset = GetRestartPoint(index);
         value_ = Slice(data_ + offset, 0);
     }
@@ -240,13 +231,12 @@ private:
     }
 
     const Comparator* const comparator_;
-    const char* const data_;      // underlying block contents
-    uint32_t const restarts_;     // Offset of restart array
-    uint32_t const num_restarts_; // Number of uint32_t entries in restart array
+    const char* const data_;
+    uint32_t const restarts_;
+    uint32_t const num_restarts_;
 
-    // current_ is offset in data_ of current entry.  >= restarts_ if !Valid
     uint32_t current_;
-    uint32_t restart_index_;  // Index of restart block in which current_ falls
+    uint32_t restart_index_;
     std::string key_;
     Slice value_;
     Status status_;
@@ -276,7 +266,7 @@ static Status ReadBlockFromHandle(std::ifstream& file, std::mutex& file_mutex,
 
     {
         std::lock_guard<std::mutex> lock(file_mutex);
-        file.clear();  // Clear any previous EOF/error flags
+        file.clear();
         file.seekg(handle.offset(), std::ios::beg);
         file.read(buf, n + kBlockTrailerSize);
         if (file.gcount() != static_cast<std::streamsize>(n + kBlockTrailerSize)) {
@@ -333,12 +323,11 @@ struct Table::Rep {
         delete filter;
         delete[] const_cast<char*>(filter_data);
         delete index_block;
-        // file_ is closed automatically by ifstream destructor
     }
 
     Options options;
     Status status;
-    std::string filename;     // Path to the SSTable file
+    std::string filename;
     uint64_t file_size;
     
     // Persistent file handle — opened once, reused for all reads.
@@ -352,7 +341,7 @@ struct Table::Rep {
     size_t filter_data_size;
     BloomFilterPolicy* filter;
 
-    BlockHandle metaindex_handle;  // Handle to metaindex_block: saved from footer
+    BlockHandle metaindex_handle;
 };
 
 Status Table::Open(const Options& options,
@@ -364,7 +353,6 @@ Status Table::Open(const Options& options,
         return Status::Corruption("file is too short to be an sstable");
     }
 
-    // Open the persistent file handle for this Table.
     Rep* rep = new Table::Rep;
     rep->file_.open(filename, std::ios::in | std::ios::binary);
     if (!rep->file_.is_open()) {
@@ -372,7 +360,6 @@ Status Table::Open(const Options& options,
         return Status::IOError("Failed to open SSTable: ", filename);
     }
 
-    // Read the footer using the persistent handle.
     char footer_input[Footer::kEncodedLength];
     {
         std::lock_guard<std::mutex> lock(rep->file_mutex_);
@@ -421,7 +408,7 @@ Status Table::Open(const Options& options,
 
 void Table::ReadMeta(const Footer& footer) {
     if (rep_->options.bloom_bits_per_key == 0) {
-        return; // Filter disabled
+        return;
     }
 
     ReadOptions opt;
@@ -432,7 +419,7 @@ void Table::ReadMeta(const Footer& footer) {
     Status s = ReadBlockFromHandle(rep_->file_, rep_->file_mutex_, opt,
                                    footer.metaindex_handle(), &meta);
     if (!s.ok()) {
-        return; // Ignore errors reading metaindex
+        return;
     }
 
     std::unique_ptr<Block> meta_guard(meta);
@@ -453,7 +440,6 @@ void Table::ReadFilter(const Slice& filter_handle_value) {
         return;
     }
 
-    // Read raw filter data using the persistent file handle.
     size_t n = static_cast<size_t>(filter_handle.size());
     char* buf = new char[n];
 
@@ -515,7 +501,6 @@ Iterator* Table::BlockReader(void* arg, const ReadOptions& options, const Slice&
     return NewErrorIterator(s);
 }
 
-// TwoLevelIterator implementation
 class TwoLevelIterator : public Iterator {
 public:
     TwoLevelIterator(
@@ -633,8 +618,6 @@ private:
         }
         Slice handle = index_iter_->value();
         if (data_iter_ != nullptr && handle.compare(data_block_handle_) == 0) {
-            // data_iter_ is already constructed with this handle, no need
-            // to change anything
         } else {
             Iterator* iter = (*block_function_)(arg_, options_, handle);
             data_block_handle_.assign(handle.data(), handle.size());
@@ -670,12 +653,10 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k,
     iiter->Seek(k);
     if (iiter->Valid()) {
         Slice handle_value = iiter->value();
-        // optionally check bloom filter
         if (rep_->filter != nullptr) {
-            // Bloom filter stores user keys. Extract user key if internal key.
             Slice filter_key = (k.size() >= 8) ? InternalKey::ExtractUserKey(k) : k;
             if (!rep_->filter->KeyMayMatch(filter_key, Slice(rep_->filter_data, rep_->filter_data_size))) {
-                return s; // Not found
+                return s;
             }
         }
 
@@ -695,7 +676,7 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k,
 
 bool Table::MayContain(const Slice& user_key) const {
     if (rep_->filter == nullptr) {
-        return true;  // No filter, conservatively return true
+        return true;
     }
     return rep_->filter->KeyMayMatch(user_key, Slice(rep_->filter_data, rep_->filter_data_size));
 }
@@ -717,4 +698,4 @@ uint64_t Table::ApproximateOffsetOf(const Slice& key) const {
     return rep_->metaindex_handle.offset();
 }
 
-}  // namespace lsm
+}

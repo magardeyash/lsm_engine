@@ -27,24 +27,20 @@ namespace {
 // when they detect an element in the cache acquiring or losing its only
 // external reference.
 
-// An entry is a variable length heap-allocated structure.  Entries
-// are kept in a circular doubly linked list ordered by access time.
 struct LRUHandle {
     void* value;
     void (*deleter)(const Slice&, void* value);
     LRUHandle* next_hash;
     LRUHandle* next;
     LRUHandle* prev;
-    size_t charge;  // TODO(opt): Only allow uint32_t?
+    size_t charge;
     size_t key_length;
-    bool in_cache;     // Whether entry is in the cache.
-    uint32_t refs;     // References, including cache reference, if present.
-    uint32_t hash;     // Hash of key(); used for fast sharding and comparisons
-    char key_data[1];  // Beginning of key
+    bool in_cache;
+    uint32_t refs;
+    uint32_t hash;
+    char key_data[1];
 
     Slice key() const {
-        // next_ is only equal to this if the unreferenced and the referenced
-        // lists are empty, which isn't the case here.
         return Slice(key_data, key_length);
     }
 };
@@ -71,8 +67,6 @@ public:
         if (old == nullptr) {
             ++elems_;
             if (elems_ > length_) {
-                // Since each cache entry is fairly large, we aim for a small
-                // average linked list length (<= 1).
                 Resize();
             }
         }
@@ -90,8 +84,6 @@ public:
     }
 
 private:
-    // The table consists of an array of buckets where each bucket is
-    // a linked list of cache entries that hash into the bucket.
     uint32_t length_;
     uint32_t elems_;
     LRUHandle** list_;
@@ -135,13 +127,11 @@ private:
     }
 };
 
-// A single shard of sharded cache.
 class LRUCache {
 public:
     LRUCache();
     ~LRUCache();
 
-    // Separate from constructor so caller can easily make an array of LRUCache
     void SetCapacity(size_t capacity) { capacity_ = capacity; }
 
     Cache::Handle* Insert(const Slice& key, uint32_t hash,
@@ -163,7 +153,6 @@ private:
     void Unref(LRUHandle* e);
     bool FinishErase(LRUHandle* e);
 
-    // Initialized before use.
     size_t capacity_;
 
     // mutex_ protects the following state.
@@ -175,8 +164,6 @@ private:
     // Entries have refs==1 and in_cache==true.
     LRUHandle lru_;
 
-    // Dummy head of in-use list.
-    // Entries are in use by clients, and have refs >= 2 and in_cache==true.
     LRUHandle in_use_;
 
     HandleTable table_;
@@ -184,7 +171,6 @@ private:
 
 LRUCache::LRUCache()
     : capacity_(0), usage_(0) {
-    // Make empty circular linked lists.
     lru_.next = &lru_;
     lru_.prev = &lru_;
     in_use_.next = &in_use_;
@@ -192,19 +178,19 @@ LRUCache::LRUCache()
 }
 
 LRUCache::~LRUCache() {
-    assert(in_use_.next == &in_use_);  // Error if caller has an unreleased handle
+    assert(in_use_.next == &in_use_);
     for (LRUHandle* e = lru_.next; e != &lru_;) {
         LRUHandle* next = e->next;
         assert(e->in_cache);
         e->in_cache = false;
-        assert(e->refs == 1);  // In LRU list, expected to have 1 ref
+        assert(e->refs == 1);
         Unref(e);
         e = next;
     }
 }
 
 void LRUCache::Ref(LRUHandle* e) {
-    if (e->refs == 1 && e->in_cache) {  // If on lru_ list, move to in_use_ list.
+    if (e->refs == 1 && e->in_cache) {
         LRU_Remove(e);
         LRU_Append(&in_use_, e);
     }
@@ -214,12 +200,11 @@ void LRUCache::Ref(LRUHandle* e) {
 void LRUCache::Unref(LRUHandle* e) {
     assert(e->refs > 0);
     e->refs--;
-    if (e->refs == 0) {  // Deallocate.
+    if (e->refs == 0) {
         assert(!e->in_cache);
         (*e->deleter)(e->key(), e->value);
         free(e);
     } else if (e->in_cache && e->refs == 1) {
-        // No longer in use; move to lru_ list.
         LRU_Remove(e);
         LRU_Append(&lru_, e);
     }
@@ -231,7 +216,6 @@ void LRUCache::LRU_Remove(LRUHandle* e) {
 }
 
 void LRUCache::LRU_Append(LRUHandle* list, LRUHandle* e) {
-    // Make "e" newest entry by inserting just before lru_
     e->next = list;
     e->prev = list->prev;
     e->prev->next = e;
@@ -265,24 +249,23 @@ Cache::Handle* LRUCache::Insert(
     e->key_length = key.size();
     e->hash = hash;
     e->in_cache = false;
-    e->refs = 1;  // for the returned handle.
+    e->refs = 1;
     std::memcpy(e->key_data, key.data(), key.size());
 
     if (capacity_ > 0) {
-        e->refs++;  // for the cache's reference.
+        e->refs++;
         e->in_cache = true;
         LRU_Append(&in_use_, e);
         usage_ += charge;
         FinishErase(table_.Insert(e));
-    } else {  // don't cache. (capacity_==0 is supported and turns off caching.)
-        // next is read by key() in an assert, so it must be initialized
+    } else {
         e->next = nullptr;
     }
     while (usage_ > capacity_ && lru_.next != &lru_) {
         LRUHandle* old = lru_.next;
         assert(old->refs == 1);
         bool erased = FinishErase(table_.Remove(old->key(), old->hash));
-        if (!erased) {  // to avoid unused variable when compiled NDEBUG
+        if (!erased) {
             assert(erased);
         }
     }
@@ -290,8 +273,6 @@ Cache::Handle* LRUCache::Insert(
     return reinterpret_cast<Cache::Handle*>(e);
 }
 
-// If e != nullptr, finish removing *e from the cache; it has already been
-// removed from the hash table.  Return whether e != nullptr.
 bool LRUCache::FinishErase(LRUHandle* e) {
     if (e != nullptr) {
         assert(e->in_cache);
@@ -314,15 +295,13 @@ void LRUCache::Prune() {
         LRUHandle* e = lru_.next;
         assert(e->refs == 1);
         bool erased = FinishErase(table_.Remove(e->key(), e->hash));
-        if (!erased) {  // to avoid unused variable when compiled NDEBUG
+        if (!erased) {
             assert(erased);
         }
     }
 }
 
-// Simple Hash Helper
 inline uint32_t HashSlice(const Slice& s) {
-    // simplified hash
     uint32_t h =  0x1b873593;
     for (size_t i = 0; i < s.size(); ++i) {
         h = (h << 5) + h + s[i];
@@ -330,7 +309,6 @@ inline uint32_t HashSlice(const Slice& s) {
     return h;
 }
 
-// ShardedLRUCache wrapper
 static const int kNumShardBits = 4;
 static const int kNumShards = 1 << kNumShardBits;
 
@@ -403,10 +381,10 @@ public:
     }
 };
 
-}  // end anonymous namespace
+}
 
 Cache* NewLRUCache(size_t capacity) {
     return new ShardedLRUCache(capacity);
 }
 
-}  // namespace lsm
+}

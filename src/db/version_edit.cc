@@ -3,7 +3,6 @@
 
 namespace lsm {
 
-// Tag numbers for serialized VersionEdit.
 enum Tag {
     kComparator           = 1,
     kLogNumber            = 2,
@@ -12,7 +11,6 @@ enum Tag {
     kCompactPointer       = 5,
     kDeletedFile          = 6,
     kNewFile              = 7,
-    // 8 was kPrevLogNumber
     kPrevLogNumber        = 9
 };
 
@@ -71,14 +69,14 @@ void VersionEdit::EncodeTo(std::string* dst) const {
 
     for (const auto& deleted : deleted_files_) {
         PutVarint32(dst, kDeletedFile);
-        PutVarint32(dst, deleted.first);   // level
-        PutVarint64(dst, deleted.second);  // file number
+        PutVarint32(dst, deleted.first);
+        PutVarint64(dst, deleted.second);
     }
 
     for (size_t i = 0; i < new_files_.size(); i++) {
         const FileMetaData& f = new_files_[i].second;
         PutVarint32(dst, kNewFile);
-        PutVarint32(dst, new_files_[i].first);  // level
+        PutVarint32(dst, new_files_[i].first);
         PutVarint64(dst, f.number);
         PutVarint64(dst, f.file_size);
         PutLengthPrefixedSlice(dst, f.smallest.Encode());
@@ -149,11 +147,8 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
                 break;
 
             case kCompactPointer:
-                // We don't implement compact pointers in this simplified engine
-                // But we must skip them
                 if (GetVarint32(&input, &level) &&
                     GetInternalKey(&input, &f.smallest)) {
-                    // Ignore
                 } else {
                     return Status::Corruption("VersionEdit: compact pointer");
                 }
@@ -191,4 +186,4 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
     return Status::OK();
 }
 
-}  // namespace lsm
+}

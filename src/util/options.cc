@@ -7,4 +7,4 @@ Options::Options()
     : comparator(BytewiseComparator()) {
 }
 
-}  // namespace lsm
+}

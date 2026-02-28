@@ -8,16 +8,10 @@
 
 namespace lsm {
 
-// Format of a WAL record:
-//   Checksum: uint32_t (CRC32 of type and data)
-//   Length:   uint16_t
-//   Type:     uint8_t
-//   Data:     uint8_t[Length]
+// WAL record format: [CRC32:4][Length:2][Type:1][Data:Length]
 
 class WalWriter {
 public:
-    // Create a writer that will append data to "filename".
-    // "filename" will be created if it does not exist.
     explicit WalWriter(const std::string& filename);
     ~WalWriter();
 
@@ -26,7 +20,6 @@ public:
 
     Status AddRecord(const Slice& slice);
     
-    // Flush underlying file to disk
     Status Sync();
 
 private:
@@ -37,20 +30,15 @@ private:
 
 class WalReader {
 public:
-    // Create a reader that will return log records from "filename".
     explicit WalReader(const std::string& filename);
     ~WalReader();
 
     WalReader(const WalReader&) = delete;
     WalReader& operator=(const WalReader&) = delete;
 
-    // Read the next record into *record.  Returns true if read
-    // successfully, false if we hit end of the input or a corruption.
-    // The contents of *record will be valid until the next mutating
-    // operation on this reader or until the reader is destroyed.
+    // Reads the next record into *record. Returns false on EOF or corruption.
     bool ReadRecord(Slice* record, std::string* scratch);
 
-    // Returns the status of the reader.
     Status status() const { return status_; }
 
 private:
@@ -58,8 +46,7 @@ private:
     std::ifstream file_;
     Status status_;
     
-    // Report a corruption error
     void ReportCorruption(size_t bytes, const char* reason);
 };
 
-}  // namespace lsm
+}

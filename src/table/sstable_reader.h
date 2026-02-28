@@ -13,21 +13,11 @@ class Block;
 class BlockHandle;
 class Footer;
 
-// A Table is a sorted map from strings to strings.  Tables are
-// immutable and persistent.  A Table may be safely accessed from
-// multiple threads without external synchronization.
+// Immutable persistent sorted map. Thread-safe.
 class Table {
 public:
-    // Attempt to open the table that is stored in bytes [0..file_size)
-    // of "file", and read the metadata entries necessary to allow
-    // retrieving data from the table.
-    //
-    // If successful, returns ok and sets "*table" to the newly opened
-    // table.  The client should delete "*table" when no longer needed.
-    // If there was an error while initializing the table, sets "*table"
-    // to nullptr and returns a non-ok status.
-    //
-    // *file must remain live while this Table is in use.
+    // Opens table from file. On success sets *table (caller must delete).
+    // Returns non-ok status and nullptr on failure. *file must outlive Table.
     static Status Open(const Options& options,
                        const std::string& filename,
                        uint64_t file_size,
@@ -38,21 +28,12 @@ public:
 
     ~Table();
 
-    // Returns a new iterator over the table contents.
-    // The result of NewIterator() is initially invalid (caller must
-    // call one of the Seek methods on the iterator before using it).
+    // Returns a new iterator. Must Seek before use.
     Iterator* NewIterator(const ReadOptions& options) const;
 
-    // Returns true if the Bloom filter indicates the user key might be
-    // present in this table.  Returns true (conservative) if no filter exists.
     bool MayContain(const Slice& user_key) const;
 
-    // Given a key, return an approximate byte offset in the file where
-    // the data for that key begins (or would begin if the key were
-    // present in the file).  The returned value is in terms of file
-    // bytes, and so includes effects like compression of the underlying data.
-    // E.g., the approximate offset of the last key in the table will
-    // be close to the file length.
+    // Approximate file byte offset of the data for key.
     uint64_t ApproximateOffsetOf(const Slice& key) const;
 
 private:
@@ -63,9 +44,6 @@ private:
 
     static Iterator* BlockReader(void*, const ReadOptions&, const Slice&);
     
-    // Calls (*handle_result)(arg, ...) with the entry found after a call
-    // to Seek(key).  May not make such a call if filter policy says
-    // that key is not present.
     friend class TableCache;
     Status InternalGet(const ReadOptions&, const Slice& key,
                        void* arg,
@@ -80,4 +58,4 @@ Iterator* NewTwoLevelIterator(Iterator* index_iter,
                               void* arg,
                               const ReadOptions& options);
 
-}  // namespace lsm
+}

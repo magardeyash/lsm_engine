@@ -9,8 +9,7 @@
 
 namespace lsm {
 
-// BlockHandle is a pointer to the extent of a file that stores a data
-// block or a meta block.
+// Points to a data block or meta block extent within a file.
 class BlockHandle {
 public:
     BlockHandle();
@@ -34,8 +33,7 @@ private:
     uint64_t size_;
 };
 
-// Footer encapsulates the fixed information stored at the tail
-// end of every table file.
+// Encapsulates the fixed-size footer at the tail of every table file.
 class Footer {
 public:
     Footer() = default;
@@ -53,9 +51,7 @@ public:
     void EncodeTo(std::string* dst) const;
     Status DecodeFrom(Slice* input);
 
-    // Encoded length of a Footer.  Note that the serialization of a
-    // Footer will always occupy exactly this many bytes.  It consists
-    // of two block handles and a magic number.
+    // Encoded footer size: 2 block handles + 8-byte magic number.
     enum { kEncodedLength = 2 * BlockHandle::kMaxEncodedLength + 8 };
 
 private:
@@ -63,24 +59,11 @@ private:
     BlockHandle index_handle_;
 };
 
-// kTableMagicNumber was picked by running
-//    echo http://code.google.com/p/leveldb/ | sha1sum
-// and taking the leading 64 bits.
 static const uint64_t kTableMagicNumber = 0xdb4775248b80fb57ull;
 
-// 1-byte type + 32-bit crc
 static const size_t kBlockTrailerSize = 5;
 
-// BlockBuilder generates blocks where keys are prefix-compressed:
-//
-// When we store a key, we drop the prefix shared with the previous
-// string.  This helps reduce the space requirement significantly.
-// Furthermore, once every K keys, we do not apply the prefix
-// compression and store the entire key.  We call this a "restart
-// point".  The tail end of the block stores the offsets of all of the
-// restart points, and can be used to do a binary search when looking
-// for a particular key.  Values are stored as-is (without compression)
-// immediately following the corresponding key.
+// Builds blocks with prefix-compressed keys and restart points for binary search.
 
 class BlockBuilder {
 public:
@@ -105,18 +88,17 @@ public:
     // we are building.
     size_t CurrentSizeEstimate() const;
 
-    // Return true iff no entries have been added since the last Reset()
     bool empty() const {
         return buffer_.empty();
     }
 
 private:
     const Options* options_;
-    std::string buffer_;              // Destination buffer
-    std::vector<uint32_t> restarts_;  // Restart points
-    int counter_;                   // Number of entries emitted since restart
-    bool finished_;                 // Has Finish() been called?
+    std::string buffer_;
+    std::vector<uint32_t> restarts_;
+    int counter_;
+    bool finished_;
     std::string last_key_;
 };
 
-}  // namespace lsm
+}

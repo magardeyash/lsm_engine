@@ -50,7 +50,6 @@ Status DB::Open(const Options& options, const std::string& name, DB** dbptr) {
     impl->mutex_.lock();
     VersionEdit edit;
 
-    // Create directory if missing
     struct stat st;
     if (stat(name.c_str(), &st) != 0) {
         if (options.create_if_missing) {
@@ -114,7 +113,7 @@ DBImpl::~DBImpl() {
     {
         std::unique_lock<std::mutex> l(mutex_);
         shutting_down_.store(true, std::memory_order_release);
-        bg_work_cv_.notify_one();  // Wake the background thread so it can exit
+        bg_work_cv_.notify_one();
     }
 
     // Join the persistent background thread
@@ -199,9 +198,7 @@ DBImpl::Writer* DBImpl::BuildBatchGroup(Writer** last_writer) {
     Writer* first = writers_.front();
     *last_writer = first;
 
-    // Walk the deque and group all pending writers into the batch.
-    // Cap the batch at ~1 MB to avoid excessive WAL record sizes.
-    static const size_t kMaxBatchSize = 1 << 20;  // 1 MB
+    static const size_t kMaxBatchSize = 1 << 20;
     size_t size = first->key.size() + first->value.size();
 
     for (auto it = writers_.begin() + 1; it != writers_.end(); ++it) {
@@ -217,8 +214,6 @@ Status DBImpl::Write(Writer* my_writer) {
     std::unique_lock<std::mutex> l(mutex_);
     writers_.push_back(my_writer);
 
-    // Wait until this writer becomes the leader (front of deque) or is
-    // completed by another leader.
     while (!my_writer->done && my_writer != writers_.front()) {
         my_writer->cv.wait(l);
     }
@@ -240,7 +235,6 @@ Status DBImpl::Write(Writer* my_writer) {
         bool need_sync = false;
         uint32_t count = 0;
 
-        // Reserve space for count header, will fill in later
         record.resize(4);
 
         for (auto it = writers_.begin(); ; ++it) {
@@ -255,7 +249,6 @@ Status DBImpl::Write(Writer* my_writer) {
             if (w == last_writer) break;
         }
 
-        // Fill in the count header
         EncodeFixed32(&record[0], count);
 
         s = log_->AddRecord(record);
@@ -263,7 +256,6 @@ Status DBImpl::Write(Writer* my_writer) {
             s = log_->Sync();
         }
 
-        // Apply all entries to the memtable
         if (s.ok()) {
             uint64_t seq = versions_->LastSequence();
             for (auto it = writers_.begin(); ; ++it) {
@@ -276,7 +268,6 @@ Status DBImpl::Write(Writer* my_writer) {
         }
     }
 
-    // Signal all writers in the batch that they are done.
     while (true) {
         Writer* ready = writers_.front();
         writers_.pop_front();
@@ -288,7 +279,6 @@ Status DBImpl::Write(Writer* my_writer) {
         if (ready == last_writer) break;
     }
 
-    // Wake the next leader if there are more writers waiting.
     if (!writers_.empty()) {
         writers_.front()->cv.notify_one();
     }
@@ -315,9 +305,7 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key, std::string* va
     l.unlock();
 
     if (mem->Get(lkey, value, &s)) {
-        // Done
     } else if (imm != nullptr && imm->Get(lkey, value, &s)) {
-        // Done
     } else {
         current->Get(options, lkey.internal_key(), value, &s);
     }
@@ -372,8 +360,6 @@ Iterator* DBImpl::NewIterator(const ReadOptions& options) {
 
         void Prev() override {
             iter_->Prev();
-            // This is a simplified Prev, we don't fully implement reverse iteration
-            // correctly here for overlapping keys, but we'll step back to a valid one.
             FindPrevUserEntry();
         }
 
@@ -395,20 +381,17 @@ Iterator* DBImpl::NewIterator(const ReadOptions& options) {
 
     private:
         void FindNextUserEntry(bool skipping) {
-            // Very simplified DBIterator: skip deleted keys and older sequence numbers
             std::string saved_key;
             while (iter_->Valid()) {
                 ParsedInternalKey ikey;
                 if (ParseInternalKey(iter_->key(), &ikey) && ikey.sequence <= sequence_) {
                     if (skipping && user_comparator_->Compare(ikey.user_key, Slice(saved_key)) == 0) {
-                        // Already saw a newer version
                     } else {
                         saved_key.assign(ikey.user_key.data(), ikey.user_key.size());
                         skipping = true;
                         if (ikey.type == kTypeDeletion) {
-                            // Skip deleted
                         } else {
-                            return; // Found valid entry
+                            return;
                         }
                     }
                 }
@@ -417,11 +400,10 @@ Iterator* DBImpl::NewIterator(const ReadOptions& options) {
         }
         
         void FindPrevUserEntry() {
-            // Simplified reverse mapping, not fully compliant with LevelDB reverse iteration
             while (iter_->Valid()) {
                 ParsedInternalKey ikey;
                 if (ParseInternalKey(iter_->key(), &ikey) && ikey.sequence <= sequence_ && ikey.type != kTypeDeletion) {
-                    return; // Rough approximation
+                    return;
                 }
                 iter_->Prev();
             }
@@ -454,7 +436,7 @@ void DBImpl::MaybeScheduleCompaction() {
     }
 
     bg_compaction_scheduled_ = true;
-    bg_work_cv_.notify_one();  // Wake the persistent background thread
+    bg_work_cv_.notify_one();
 }
 
 void DBImpl::BackgroundThreadMain() {
@@ -471,30 +453,25 @@ void DBImpl::BackgroundThreadMain() {
 void DBImpl::BackgroundCall() {
     assert(bg_compaction_scheduled_);
     if (shutting_down_.load(std::memory_order_acquire)) {
-        // Stop
     } else if (!bg_error_.ok()) {
-        // Stop
     } else {
         BackgroundCompaction();
     }
 
     bg_compaction_scheduled_ = false;
 
-    // Previous compaction may have produced too many files in a level,
-    // so reschedule if needed.
     MaybeScheduleCompaction();
     bg_cv_.notify_all();
 }
 
 Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit, Version* base) {
-    std::unique_lock<std::mutex> l(mutex_, std::defer_lock); // Not strictly locked while dumping
+    std::unique_lock<std::mutex> l(mutex_, std::defer_lock);
 
     FileMetaData meta;
     meta.number = versions_->NewFileNumber();
     std::string fname = TableFileName(dbname_, meta.number);
     std::ofstream* file = new std::ofstream(fname, std::ios::out | std::ios::binary);
 
-    // SSTables store internal keys, so use internal comparator
     Options table_options = options_;
     table_options.comparator = &internal_comparator_;
     TableBuilder* builder = new TableBuilder(table_options, file);
@@ -551,7 +528,6 @@ Status DBImpl::BackgroundCompaction() {
     Compaction* c = versions_->PickCompaction();
     Status status;
     if (c == nullptr) {
-        // Nothing to do
     } else if (c->IsTrivialMove()) {
         VersionEdit edit;
         FileMetaData* f = c->input(0, 0);
@@ -572,7 +548,6 @@ Status DBImpl::BackgroundCompaction() {
 Status DBImpl::DoCompactionWork(Compaction* c) {
     mutex_.unlock();
 
-    // Build iterators for all input files from both levels
     std::vector<Iterator*> list;
     for (int i = 0; i < c->num_input_files(0); i++) {
         list.push_back(table_cache_->NewIterator(ReadOptions(),
@@ -597,8 +572,6 @@ Status DBImpl::DoCompactionWork(Compaction* c) {
     // the main thread may be advancing it concurrently.
     const uint64_t smallest_snapshot = versions_->LastSequence();
 
-    // Track the current output file being built
-    // SSTables store internal keys, so use internal comparator
     Options table_options = options_;
     table_options.comparator = &internal_comparator_;
     std::ofstream* outfile = nullptr;
@@ -606,15 +579,12 @@ Status DBImpl::DoCompactionWork(Compaction* c) {
     InternalKey smallest_key, largest_key;
     uint64_t output_file_number = 0;
 
-    // Add input file deletions to the edit
     c->AddInputDeletions(&c->edit_);
 
     while (input->Valid() && !shutting_down_.load(std::memory_order_acquire)) {
         Slice key = input->key();
 
-        // Check if we should start a new output file due to grandparent overlap
         if (c->ShouldStopBefore(key) && builder != nullptr) {
-            // Finish current output
             status = builder->Finish();
             if (status.ok()) {
                 c->edit_.AddFile(c->level() + 1, output_file_number,
@@ -667,7 +637,6 @@ Status DBImpl::DoCompactionWork(Compaction* c) {
         }
 
         if (!drop) {
-            // Open a new output file if needed
             if (builder == nullptr) {
                 output_file_number = versions_->NewFileNumber();
                 std::string fname = TableFileName(dbname_, output_file_number);
@@ -704,7 +673,6 @@ Status DBImpl::DoCompactionWork(Compaction* c) {
         status = Status::IOError("Deleting DB during compaction");
     }
 
-    // Finish the last output file if any
     if (status.ok() && builder != nullptr) {
         status = builder->Finish();
         if (status.ok()) {
@@ -727,7 +695,6 @@ Status DBImpl::DoCompactionWork(Compaction* c) {
 }
 
 void DBImpl::CleanupCompaction(Compaction* c) {
-    // Evict table cache entries for deleted input files
     for (int which = 0; which < 2; which++) {
         for (int i = 0; i < c->num_input_files(which); i++) {
             table_cache_->Evict(c->input(which, i)->number);
@@ -735,4 +702,4 @@ void DBImpl::CleanupCompaction(Compaction* c) {
     }
 }
 
-}  // namespace lsm
+}

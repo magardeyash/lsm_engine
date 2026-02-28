@@ -15,7 +15,6 @@ void PutFixed64(std::string* dst, uint64_t value) {
 }
 
 char* EncodeVarint32(char* dst, uint32_t v) {
-    // Operate on characters as unsigneds
     uint8_t* ptr = reinterpret_cast<uint8_t*>(dst);
     static const int B = 128;
     if (v < (1 << 7)) {
@@ -87,7 +86,6 @@ const char* GetVarint32PtrFallback(const char* p,
         uint32_t byte = *(reinterpret_cast<const uint8_t*>(p));
         p++;
         if (byte & 128) {
-            // More bytes are present
             result |= ((byte & 127) << shift);
         } else {
             result |= (byte << shift);
@@ -129,7 +127,6 @@ const char* GetVarint64Ptr(const char* p, const char* limit, uint64_t* value) {
         uint64_t byte = *(reinterpret_cast<const uint8_t*>(p));
         p++;
         if (byte & 128) {
-            // More bytes are present
             result |= ((byte & 127) << shift);
         } else {
             result |= (byte << shift);
@@ -164,4 +161,4 @@ bool GetLengthPrefixedSlice(Slice* input, Slice* result) {
     }
 }
 
-}  // namespace lsm
+}

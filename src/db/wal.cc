@@ -5,7 +5,7 @@
 
 namespace lsm {
 
-static const int kHeaderSize = 4 + 2 + 1; // crc (4), len (2), type (1)
+static const int kHeaderSize = 4 + 2 + 1;
 static const uint8_t kRecordTypeFull = 1;
 
 WalWriter::WalWriter(const std::string& filename)
@@ -36,14 +36,13 @@ Status WalWriter::AddRecord(const Slice& slice) {
 
     uint32_t crc;
     uint16_t length = static_cast<uint16_t>(slice.size());
-    uint8_t type = kRecordTypeFull; // Simplified: all records are FULL
+    uint8_t type = kRecordTypeFull;
 
     char header[kHeaderSize];
     header[4] = static_cast<char>(length & 0xff);
     header[5] = static_cast<char>(length >> 8);
     header[6] = type;
 
-    // Compute CRC
     crc = crc32c::Value(header + 4, 3);
     crc = crc32c::Extend(crc, slice.data(), slice.size());
     crc = crc32c::Mask(crc);
@@ -56,7 +55,6 @@ Status WalWriter::AddRecord(const Slice& slice) {
     file_.write(header, kHeaderSize);
     file_.write(slice.data(), slice.size());
 
-    // Flush to OS, but not necessarily disk
     file_.flush();
 
     if (file_.fail()) {
@@ -69,7 +67,6 @@ Status WalWriter::AddRecord(const Slice& slice) {
 Status WalWriter::Sync() {
     if (!status_.ok()) return status_;
 
-    // Not truly cross platform fsync in std::ofstream, but flush is good enough for demonstration.
     file_.flush();
     if (file_.fail()) {
         status_ = Status::IOError("Failed to sync WAL");
@@ -77,13 +74,10 @@ Status WalWriter::Sync() {
     return status_;
 }
 
-// ------------------------------------------------------------------------
-
 WalReader::WalReader(const std::string& filename)
     : filename_(filename),
       file_(filename, std::ios::in | std::ios::binary) {
     if (!file_.is_open()) {
-        // Since WAL doesn't always exist on new DB, this might be OK depending on caller.
         status_ = Status::NotFound("WAL file not found", filename);
     }
 }
@@ -103,7 +97,6 @@ bool WalReader::ReadRecord(Slice* record, std::string* scratch) {
         return false;
     }
     if (status_.IsNotFound()) {
-        // Clear it if we are just now reading. But file isn't open
         status_ = Status::OK();
         if (!file_.is_open()) return false;
     }
@@ -143,11 +136,10 @@ bool WalReader::ReadRecord(Slice* record, std::string* scratch) {
             *record = Slice(*scratch);
             return true;
         } else {
-            // Unrecognized record type, possibly fragmented
             ReportCorruption(length, "Unrecognized record type or unsupported fragmentation");
             return false;
         }
     }
 }
 
-}  // namespace lsm
+}

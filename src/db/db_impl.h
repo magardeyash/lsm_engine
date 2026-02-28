@@ -26,14 +26,12 @@ public:
     Status Get(const ReadOptions& options, const Slice& key, std::string* value) override;
     Iterator* NewIterator(const ReadOptions& options) override;
 
-    // Recover the database
     Status Recover();
 
 private:
     friend class DB;
     struct Writer;
 
-    // Group commit: batches multiple writers into a single WAL write
     Status Write(Writer* my_writer);
     Writer* BuildBatchGroup(Writer** last_writer);
 
@@ -47,29 +45,25 @@ private:
     Status DoCompactionWork(Compaction* c);
     void CleanupCompaction(Compaction* c);
 
-    // Constant after construction
     const Options options_;
     const std::string dbname_;
     InternalKeyComparator internal_comparator_;
 
-    // Options copy with internal comparator for SSTable I/O
     Options internal_options_;
 
     // table_cache_ provides its own synchronization
     TableCache* table_cache_;
 
-    // Lock over the mutable state of the DB.
     std::mutex mutex_;
     std::condition_variable bg_cv_;
     std::atomic<bool> shutting_down_;
     bool bg_compaction_scheduled_;
 
-    // Persistent background compaction thread
     std::thread bg_thread_;
     std::condition_variable bg_work_cv_;
 
     MemTable* mem_;
-    MemTable* imm_;  // Memtable being compacted
+    MemTable* imm_;
     std::atomic<bool> has_imm_;
 
     std::unique_ptr<WalWriter> log_;
@@ -84,7 +78,6 @@ private:
     struct CompactionState {
         Compaction* const compaction;
         
-        // Output state
         uint64_t outfile_number;
         uint64_t outfile_size;
         std::unique_ptr<TableBuilder> builder;
@@ -102,4 +95,4 @@ private:
     };
 };
 
-}  // namespace lsm
+}

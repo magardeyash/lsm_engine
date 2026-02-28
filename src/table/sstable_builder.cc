@@ -24,7 +24,7 @@ struct TableBuilder::Rep {
     BlockBuilder index_block;
     std::string last_key;
     int64_t num_entries;
-    bool closed;          // Either Finish() or Abandon() has been called.
+    bool closed;
     
     // We do not implement the FilterBlockBuilder in full generality
     // for this simplified engine - we'll just gather all keys in memory
@@ -34,7 +34,7 @@ struct TableBuilder::Rep {
     std::vector<std::string> keys;
     
     bool pending_index_entry;
-    BlockHandle pending_handle;  // Handle to add to index block
+    BlockHandle pending_handle;
 
     std::string compressed_output;
 
@@ -57,7 +57,7 @@ TableBuilder::TableBuilder(const Options& options, std::ofstream* file)
 }
 
 TableBuilder::~TableBuilder() {
-    assert(rep_->closed);  // Catch errors where caller forgot to call Finish()/Abandon()
+    assert(rep_->closed);
     delete rep_;
 }
 
@@ -88,10 +88,7 @@ void TableBuilder::Add(const Slice& key, const Slice& value) {
         r->pending_index_entry = false;
     }
 
-    // Add key to bloom filter keys
     if (r->options.bloom_bits_per_key > 0) {
-        // Store user key in bloom filter. Internal keys have 8-byte suffix;
-        // if key is long enough, extract user key portion.
         if (key.size() >= 8) {
             r->keys.push_back(InternalKey::ExtractUserKey(key).ToString());
         } else {
@@ -147,7 +144,6 @@ void TableBuilder::WriteBlock(BlockBuilder* block, BlockHandle* handle) {
                 &r->compressed_output[0], max_compressed_size,
                 raw.data(), raw.size(), 1 /* default level */);
             if (ZSTD_isError(compressed_size)) {
-                // Fall back to no compression
                 block_contents = raw;
                 type = Options::kNoCompression;
             } else {
@@ -155,7 +151,6 @@ void TableBuilder::WriteBlock(BlockBuilder* block, BlockHandle* handle) {
                 block_contents = Slice(r->compressed_output);
             }
 #else
-            // Zstd not supported, fall back to no compression
             block_contents = raw;
             type = Options::kNoCompression;
 #endif
@@ -183,7 +178,7 @@ void TableBuilder::WriteRawBlock(const Slice& block_contents,
     char trailer[kBlockTrailerSize];
     trailer[0] = static_cast<char>(type);
     uint32_t crc = crc32c::Value(block_contents.data(), block_contents.size());
-    crc = crc32c::Extend(crc, trailer, 1);  // Extend crc to cover block type
+    crc = crc32c::Extend(crc, trailer, 1);
     EncodeFixed32(trailer + 1, crc32c::Mask(crc));
     
     r->file->write(trailer, kBlockTrailerSize);
@@ -249,7 +244,6 @@ Status TableBuilder::Finish() {
         WriteBlock(&r->index_block, &index_block_handle);
     }
 
-    // Write footer
     if (ok()) {
         Footer footer;
         footer.set_metaindex_handle(metaindex_block_handle);
@@ -279,4 +273,4 @@ uint64_t TableBuilder::FileSize() const {
     return rep_->offset;
 }
 
-}  // namespace lsm
+}

@@ -22,7 +22,6 @@ public:
     void FindShortestSeparator(
         std::string* start,
         const Slice& limit) const override {
-        // Find length of common prefix
         size_t min_length = std::min(start->size(), limit.size());
         size_t diff_index = 0;
         while ((diff_index < min_length) &&
@@ -31,7 +30,6 @@ public:
         }
 
         if (diff_index >= min_length) {
-            // Do not shorten if one string is a prefix of the other
         } else {
             uint8_t diff_byte = static_cast<uint8_t>((*start)[diff_index]);
             if (diff_byte < static_cast<uint8_t>(0xff) &&
@@ -43,7 +41,6 @@ public:
     }
 
     void FindShortSuccessor(std::string* key) const override {
-        // Find first character that can be incremented
         size_t n = key->size();
         for (size_t i = 0; i < n; i++) {
             const uint8_t byte = (*key)[i];
@@ -53,14 +50,13 @@ public:
                 return;
             }
         }
-        // *key is a run of 0xffs. Leave it alone.
     }
 };
-}  // namespace
+}
 
 const Comparator* BytewiseComparator() {
     static BytewiseComparatorImpl singleton;
     return &singleton;
 }
 
-}  // namespace lsm
+}

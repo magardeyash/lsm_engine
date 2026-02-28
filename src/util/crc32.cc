@@ -81,5 +81,5 @@ uint32_t Extend(uint32_t init_crc, const char* data, size_t n) {
     return c ^ 0xffffffff;
 }
 
-}  // namespace crc32c
-}  // namespace lsm
+}
+}

@@ -36,7 +36,6 @@ TableCache::~TableCache() {
     delete cache_;
 }
 
-// Convert file number into a string for cache key
 static std::string TableFileName(const std::string& dbname, uint64_t number) {
     char buf[100];
     snprintf(buf, sizeof(buf), "%s/%06llu.sst", dbname.c_str(),
@@ -82,13 +81,9 @@ Iterator* TableCache::NewIterator(const ReadOptions& options,
     }
 
     Table* table = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table.get();
-    // Capture a shared_ptr copy so the Table stays alive even if evicted
-    // from the cache while this iterator is in use.
     std::shared_ptr<Table> table_ref = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table;
     Iterator* result = table->NewIterator(options);
 
-    // Wrap the iterator to release the cache handle and hold a shared_ptr
-    // reference to the Table, ensuring it outlives the iterator.
     class TableCacheIteratorWrapper : public Iterator {
     public:
         TableCacheIteratorWrapper(Iterator* iter, Cache* cache, Cache::Handle* handle,
@@ -111,7 +106,7 @@ Iterator* TableCache::NewIterator(const ReadOptions& options,
         Iterator* iter_;
         Cache* cache_;
         Cache::Handle* handle_;
-        std::shared_ptr<Table> table_ref_;  // Prevents Table destruction
+        std::shared_ptr<Table> table_ref_;
     };
     
     Iterator* wrapped = new TableCacheIteratorWrapper(result, cache_, handle, table_ref);
@@ -132,8 +127,6 @@ Status TableCache::Get(const ReadOptions& options,
     Status s = FindTable(file_number, file_size, &handle);
     if (s.ok()) {
         Table* t = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table.get();
-        // The InternalGet is protected by friendship or public exposure
-        // We'll expose InternalGet or use NewIterator. Table::InternalGet is better for speed.
         s = t->InternalGet(options, k, arg, handle_result);
         cache_->Release(handle);
     }
@@ -151,7 +144,7 @@ bool TableCache::MayContain(uint64_t file_number, uint64_t file_size,
     Cache::Handle* handle = nullptr;
     Status s = FindTable(file_number, file_size, &handle);
     if (!s.ok()) {
-        return true;  // Conservative: assume key may be present on error
+        return true;
     }
     Table* t = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table.get();
     bool result = t->MayContain(user_key);
@@ -159,4 +152,4 @@ bool TableCache::MayContain(uint64_t file_number, uint64_t file_size,
     return result;
 }
 
-}  // namespace lsm
+}

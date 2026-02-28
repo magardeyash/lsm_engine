@@ -6,20 +6,17 @@
 
 namespace lsm {
 
-// Extract the length of the internal key and return the key Slice
 static Slice GetLengthPrefixedSliceHelper(const char* data) {
     uint32_t len;
     const char* p = data;
-    p = GetVarint32Ptr(p, p + 5, &len);  // +5 for max varint32
+    p = GetVarint32Ptr(p, p + 5, &len);
     return Slice(p, len);
 }
 
-// Compare internal keys.
 int InternalKeyComparator::Compare(const Slice& a, const Slice& b) const {
     // Expected format: user_key (varlen) + sequence (7 bytes) + type (1 byte)
     // Here `a` and `b` are full internal keys, e.g. from internal storage
 
-    // If they aren't long enough to have an 8-byte suffix, fall back
     if (a.size() < 8 || b.size() < 8) {
         return user_comparator_->Compare(a, b);
     }
@@ -29,7 +26,6 @@ int InternalKeyComparator::Compare(const Slice& a, const Slice& b) const {
 
     int r = user_comparator_->Compare(a_user, b_user);
     if (r == 0) {
-        // Sort sequence numbers in descending order.
         uint64_t a_seq_type = DecodeFixed64(a.data() + a.size() - 8);
         uint64_t b_seq_type = DecodeFixed64(b.data() + b.size() - 8);
         
@@ -41,8 +37,6 @@ int InternalKeyComparator::Compare(const Slice& a, const Slice& b) const {
     return r;
 }
 
-// These are essentially no-ops for internal keys because
-// shortening could mess up the sequence numbers.
 void InternalKeyComparator::FindShortestSeparator(std::string* start, const Slice& limit) const {}
 void InternalKeyComparator::FindShortSuccessor(std::string* key) const {}
 
@@ -62,7 +56,6 @@ std::string InternalKey::DebugString() const {
     return result;
 }
 
-// Extract internal key and compare.
 int MemTable::KeyComparator::operator()(const char* a, const char* b) const {
     Slice a_slice = GetLengthPrefixedSliceHelper(a);
     Slice b_slice = GetLengthPrefixedSliceHelper(b);
@@ -91,7 +84,6 @@ public:
     Slice key() const override { return GetLengthPrefixedSliceHelper(iter_.key()); }
 
     Slice value() const override {
-        // The value follows the encoded key
         Slice key_slice = GetLengthPrefixedSliceHelper(iter_.key());
         const char* val_ptr = key_slice.data() + key_slice.size();
         return GetLengthPrefixedSliceHelper(val_ptr);
@@ -101,7 +93,7 @@ public:
 
 private:
     MemTable::Table::Iterator iter_;
-    std::string tmp_;       // For passing to Seek
+    std::string tmp_;
 
     const char* EncodeKey(std::string* scratch, const Slice& target) {
         scratch->clear();
@@ -128,10 +120,8 @@ MemTable::~MemTable() {
         Slice k = iter->key();
         Slice v = iter->value();
         
-        // Recover the start of the buffer
         const char* entry = k.data() - VarintLength(k.size());
         
-        // This memory was allocated using new[] in Add(), we must delete[] it here.
         delete[] entry;
     }
     delete iter;
@@ -156,7 +146,6 @@ void MemTable::Add(uint64_t seq, ValueType type,
     size_t key_size = key.size();
     size_t val_size = value.size();
     
-    // Total internal key includes the 8 bytes for sequence and type.
     size_t internal_key_size = key_size + 8;
     
     size_t encoded_len = VarintLength(internal_key_size) + internal_key_size +
@@ -174,11 +163,9 @@ void MemTable::Add(uint64_t seq, ValueType type,
     
     assert(p + val_size == buf + encoded_len);
     
-    // Insert into SkipList. Skiplist only stores char* pointers.
     table_.Insert(buf);
     
-    // Add memory usage estimate (including skip list node overhead)
-    size_t overhead = sizeof(void*) * 8; // Assuming average height of ~4, each node has array of pointers
+    size_t overhead = sizeof(void*) * 8;
     memory_usage_.fetch_add(encoded_len + overhead, std::memory_order_relaxed);
 }
 
@@ -192,9 +179,7 @@ bool MemTable::Get(const LookupKey& key, std::string* value, Status* s) {
         if (matched_internal_key.size() >= 8) {
             Slice user_key = InternalKey::ExtractUserKey(matched_internal_key);
             
-            // Re-compare just the user key to ensure it matches
             if (comparator_.comparator.user_comparator()->Compare(user_key, key.user_key()) == 0) {
-                // Determine whether it was a put or delete
                 uint64_t seq_type = InternalKey::ExtractSequenceAndType(matched_internal_key);
                 ValueType type = static_cast<ValueType>(seq_type & 0xff);
                 
@@ -214,7 +199,7 @@ bool MemTable::Get(const LookupKey& key, std::string* value, Status* s) {
 
 LookupKey::LookupKey(const Slice& user_key, uint64_t sequence) {
     size_t usize = user_key.size();
-    size_t needed = usize + 13;  // A conservative estimate
+    size_t needed = usize + 13;
     char* dst;
     if (needed <= sizeof(space_)) {
         dst = space_;
@@ -235,4 +220,4 @@ LookupKey::~LookupKey() {
     if (start_ != space_) delete[] start_;
 }
 
-}  // namespace lsm
+}

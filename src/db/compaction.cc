@@ -3,7 +3,7 @@
 
 namespace lsm {
 
-static const int64_t kMaxGrandParentOverlapBytes = 10 * 1048576; // 10MB
+static const int64_t kMaxGrandParentOverlapBytes = 10 * 1048576;
 
 static int64_t TotalFileSize(const std::vector<FileMetaData*>& files) {
     int64_t sum = 0;
@@ -50,7 +50,6 @@ void Compaction::AddInputDeletions(VersionEdit* edit) {
 }
 
 bool Compaction::IsBaseLevelForKey(const Slice& user_key) {
-    // Maybe use binary search to find right entry instead of linear search?
     const Comparator* user_cmp = input_version_->vset_->options_->comparator;
     for (int lvl = level_ + 2; lvl < lsm::Options::kNumLevels; lvl++) {
         const std::vector<FileMetaData*>& files = input_version_->files_[lvl];
@@ -59,8 +58,6 @@ bool Compaction::IsBaseLevelForKey(const Slice& user_key) {
             if (user_cmp->Compare(user_key, f->largest.user_key()) <= 0) {
                 // We've advanced far enough
                 if (user_cmp->Compare(user_key, f->smallest.user_key()) >= 0) {
-                    // Key falls in this file's range, so definitely
-                    // not base level
                     return false;
                 }
                 break;
@@ -73,7 +70,6 @@ bool Compaction::IsBaseLevelForKey(const Slice& user_key) {
 
 bool Compaction::ShouldStopBefore(const Slice& internal_key) {
     const VersionSet* vset = input_version_->vset_;
-    // Scan to find earliest grandparent file that contains key.
     const InternalKeyComparator* icmp = &vset->icmp_;
     while (grandparent_index_ < grandparents_.size() &&
            icmp->Compare(internal_key,
@@ -86,7 +82,6 @@ bool Compaction::ShouldStopBefore(const Slice& internal_key) {
     seen_key_ = true;
 
     if (overlapped_bytes_ > kMaxGrandParentOverlapBytes) {
-        // Too much overlap for current output; start new output
         overlapped_bytes_ = 0;
         return true;
     } else {
@@ -101,4 +96,4 @@ void Compaction::ReleaseInputs() {
     }
 }
 
-}  // namespace lsm
+}
